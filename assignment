@@ -1,0 +1,143 @@
+#!/usr/bin/env node
+
+const axios = require("axios");
+const fs = require("fs-extra");
+const MongoClient = require("mongodb").MongoClient;
+const mongoUrl = "mongodb://localhost:27017/reports";
+const { countsInputFileUrl, masterInputFileUrl } = require("./Files");
+let client;
+let reportsDb;
+const reportsDirectory = "./reports";
+
+const generateReportFile = (fileName, fileContent) => {
+  fs.ensureDir(reportsDirectory)
+    .then(() => {
+      fs.writeFileSync(
+        reportsDirectory + "/" + fileName,
+        fileContent
+      );
+    })
+    .catch(err => {
+      console.error(err);
+    });
+};
+
+const generateLocationBarcodeAmountReport = counts => {
+  let locationBarcodeAmountReportText = `location;barcode;amount`;
+
+  counts.forEach(count => {
+     count.completedCounts.forEach(completedCount => {
+       completedCount.contents.forEach(item => {
+         locationBarcodeAmountReportText =
+             locationBarcodeAmountReportText + "\n" + count.locationCode + ";" + item.barcode + ";" + item.amount;
+       });
+     });
+   });
+
+   // Save the reports into txt files
+   generateReportFile("LocationBarcodeAmountReport", locationBarcodeAmountReportText);
+};
+
+const generateBarcodeAmountReport = (master, counts) => {
+
+  let barcodeAmountReportText = `barcode;amount`;
+
+  const barcodes = master.map(item => item.barcode);
+
+  let results = [];
+  barcodes.forEach(barcode => {
+    let amount = 0;
+    counts.forEach(count => {
+       count.completedCounts.forEach(completedCount => {
+         completedCount.contents.forEach(item => {
+            if(barcode === item.barcode) {
+              amount = amount + item.amount;
+            }
+         });
+       });
+     });
+     results.push({
+       barcode,
+       amount
+     });
+  });
+
+  results.forEach(item => {
+    barcodeAmountReportText =
+        barcodeAmountReportText + "\n" + item.barcode + ";" + item.amount;
+  });
+
+
+  // Save the reports into txt files
+  generateReportFile("BarcodeAmountReport", barcodeAmountReportText);
+};
+
+const generateAggregatedReport = (master, counts) => {
+  let aggregatedReportText = `location;barcode;amount;sku;urun adi`;
+
+  master.forEach(item => {
+    counts.forEach(count => {
+       count.completedCounts.forEach(completedCount => {
+         completedCount.contents.forEach(c => {
+           if(item.barcode === c.barcode) {
+             aggregatedReportText =
+                 aggregatedReportText + "\n" + count.locationCode + ";" + item.barcode
+                 + ";" + c.amount + ";" + item.sku + ";" + item['urun adi'];
+           }
+         });
+       });
+     });
+  });
+
+  // Save the reports into txt files
+  generateReportFile("AggregatedReport", aggregatedReportText);
+};
+
+const generateReports = (master, counts) => {
+  generateLocationBarcodeAmountReport(counts);
+  generateBarcodeAmountReport(master, counts);
+  generateAggregatedReport(master, counts);
+};
+
+const createMongoDbCollections = (collectionName, data) => {
+  return new Promise((resolve, reject) => {
+    reportsDb.collection(collectionName).insertMany(data, (error, result) => {
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    });
+  })
+};
+
+const readJsonFileAndSave = async () => {
+  try {
+    // Read both master and counts files from related url
+    const masterFileContent = await axios.get(masterInputFileUrl);
+    const countsFileContent = await axios.get(countsInputFileUrl);
+
+    // Create collections out of file contents
+    const createMasterCollection = createMongoDbCollections("Master", masterFileContent.data);
+    const createCountsCollection = createMongoDbCollections("Counts", countsFileContent.data);
+    Promise.all([createMasterCollection, createCountsCollection]).then(function(values) {
+      client.close();
+      // Now we can generate our reports :)
+      const master = values[0].ops;
+      const counts = values[1].ops;
+      generateReports(master, counts);
+    });
+  } catch(error) {
+    console.error(error);
+  }
+};
+
+
+
+readJsonFileAndSave();
+
+MongoClient.connect(mongoUrl, { useNewUrlParser: true }, function(err, result) {
+  if (err) throw err;
+  client = result;
+  reportsDb = result.db("reports");
+});
